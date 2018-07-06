@@ -36,6 +36,11 @@
 #ifndef W25XXX_DEBUG
 #define W25XXX_DEBUG 0
 #endif
+#if W25XXX_DEBUG
+#define W25XXX_DEBUG_LEVEL LL_DEBUG
+#else
+#define W25XXX_DEBUG_LEVEL LL_VERBOSE_DEBUG
+#endif
 
 enum w25xxx_op {
   W25XXX_OP_RST = 0xff,
@@ -342,7 +347,6 @@ static enum mgos_vfs_dev_err w25xxx_page_data_read(struct w25xxx_dev_data *dd,
   }
   if (dd->ecc_chk) {
     st = w25xxx_read_reg(dd, W25XXX_REG_STAT);
-    if (page_num == 320) st |= W25XXX_REG_STAT_ECC1;
     if (st & (W25XXX_REG_STAT_ECC1 | W25XXX_REG_STAT_ECC0)) {
       bool hard = (st & W25XXX_REG_STAT_ECC1);
       LOG((hard ? LL_ERROR : LL_WARN),
@@ -374,21 +378,20 @@ static enum mgos_vfs_dev_err vfs_dev_w25xxx_read(struct mgos_vfs_dev *dev,
       res = res2;
       goto out;
     }
-    if (!w25xxx_op_arg_rx(dd, W25XXX_OP_READ, 2, page_off, 1, rd_len, dp))
+    if (!w25xxx_op_arg_rx(dd, W25XXX_OP_READ, 2, page_off, 1, rd_len, dp)) {
       goto out;
+    }
     off += rd_len;
     len -= rd_len;
     dp += rd_len;
   }
   res = MGOS_VFS_DEV_ERR_NONE;
 out:
+  LOG((res == 0 ? W25XXX_DEBUG_LEVEL : LL_ERROR),
+      ("%p read %u @ 0x%x -> %d", dev, (unsigned int) orig_len,
+       (unsigned int) orig_off, res));
 #if W25XXX_DEBUG
-  LOG(LL_DEBUG, ("%p read %u @ 0x%x -> %d", dev, (unsigned int) orig_len,
-                 (unsigned int) orig_off, ret));
-  if (ret) mg_hexdumpf(stderr, dst, orig_len);
-#else
-  (void) orig_off;
-  (void) orig_len;
+  if (res) mg_hexdumpf(stderr, dst, orig_len);
 #endif
   return res;
 }
@@ -433,6 +436,7 @@ static enum mgos_vfs_dev_err vfs_dev_w25xxx_write(struct mgos_vfs_dev *dev,
       memcpy(txn_buf + 3, dp, txn_len);
       if (!w25xxx_txn(dd, 3 + txn_len, txn_buf, 0, 0, NULL)) goto out;
       txn_buf[0] = W25XXX_OP_PROG_RAND_DATA_LOAD;
+      dp += txn_len;
     }
     if (!w25xxx_op_arg(dd, W25XXX_OP_PROG_EXECUTE, 1 + 2, page_num)) goto out;
     while ((st = w25xxx_read_reg(dd, W25XXX_REG_STAT)) & W25XXX_REG_STAT_BUSY) {
@@ -444,17 +448,12 @@ static enum mgos_vfs_dev_err vfs_dev_w25xxx_write(struct mgos_vfs_dev *dev,
     }
     off += wr_len;
     len -= wr_len;
-    dp += wr_len;
   }
   res = MGOS_VFS_DEV_ERR_NONE;
 out:
-#if W25XXX_DEBUG
-  LOG(LL_DEBUG, ("%p write %u @ 0x%x -> %d", dev, (unsigned int) orig_len,
-                 (unsigned int) orig_off, ret));
-#else
-  (void) orig_off;
-  (void) orig_len;
-#endif
+  LOG((res == 0 ? W25XXX_DEBUG_LEVEL : LL_ERROR),
+      ("%p write %u @ 0x%x -> %d", dev, (unsigned int) orig_len,
+       (unsigned int) orig_off, res));
   return res;
 }
 
@@ -490,15 +489,10 @@ static enum mgos_vfs_dev_err vfs_dev_w25xxx_erase(struct mgos_vfs_dev *dev,
   }
   res = MGOS_VFS_DEV_ERR_NONE;
 out:
-#if W25XXX_DEBUG
-  LOG(LL_DEBUG,
+  LOG((res == 0 ? W25XXX_DEBUG_LEVEL : LL_ERROR),
       ("%p erase %u @ 0x%x (pg %u blk %u) -> %d", dev, (unsigned int) orig_len,
        (unsigned int) orig_off, (unsigned int) (orig_off / W25XXX_PAGE_SIZE),
-       (unsigned int) (orig_off / W25XXX_BLOCK_SIZE), ret));
-#else
-  (void) orig_off;
-  (void) orig_len;
-#endif
+       (unsigned int) (orig_off / W25XXX_BLOCK_SIZE), res));
   return res;
 }
 
