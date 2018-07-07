@@ -102,6 +102,7 @@ struct w25xxx_dev_data {
   uint32_t bb_reserve : 8; /* # of blocks to reserve at the end of each die. */
   uint32_t ecc_chk : 1;    /* Check ECC when reading. */
   uint32_t num_dies : 2;   /* Number of dies. Currently max 2 for W25M02xx. */
+  uint32_t own_spi : 1;    /* If true, the SPI interface was created by us. */
 };
 
 static bool w25xxx_txn(struct w25xxx_dev_data *dd, size_t tx_len,
@@ -220,6 +221,8 @@ out:
 
 static bool vfs_dev_w25xxx_detect(struct w25xxx_dev_data *dd) {
   bool res = false;
+  uint8_t cfg0;
+  int num_bb;
 
   uint8_t jid[3];
   if (!w25xxx_simple_rx_op(dd, W25XXX_OP_READ_JEDEC_ID, 1, sizeof(jid), jid)) {
@@ -244,10 +247,10 @@ static bool vfs_dev_w25xxx_detect(struct w25xxx_dev_data *dd) {
   w25xxx_simple_op(dd, W25XXX_OP_RST);
   mgos_usleep(500);
 
-  const uint8_t cfg0 = w25xxx_read_reg(dd, W25XXX_REG_CONF);
+  cfg0 = w25xxx_read_reg(dd, W25XXX_REG_CONF);
 
   /* Put all the dies into buffered read mode, unprotect and read BB LUT. */
-  int num_bb = 0;
+  num_bb = 0;
   for (uint8_t i = 0; i < dd->num_dies; i++) {
     w25mxx_select_die(dd, i);
     w25xxx_write_reg(dd, W25XXX_REG_PROT, 0);
@@ -274,24 +277,40 @@ out:
 static enum mgos_vfs_dev_err vfs_dev_w25xxx_open(struct mgos_vfs_dev *dev,
                                                  const char *opts) {
   enum mgos_vfs_dev_err res = MGOS_VFS_DEV_ERR_INVAL;
+  int bb_reserve = 24, ecc_chk = true;
+  struct json_token spi_cfg_json = JSON_INVALID_TOKEN;
   struct w25xxx_dev_data *dd =
       (struct w25xxx_dev_data *) calloc(1, sizeof(*dd));
   if (dd == NULL) goto out;
-  dd->spi = mgos_spi_get_global();
-  if (dd->spi == NULL) {
-    LOG(LL_INFO, ("SPI is disabled"));
-    res = MGOS_VFS_DEV_ERR_NXIO;
-    goto out;
-  }
   dd->cs = -1;
-  int bb_reserve = 24, ecc_chk = true;
   json_scanf(opts, strlen(opts),
              "{cs: %d, freq: %d, mode: %d, "
-             "bb_reserve: %u, ecc_chk: %B}",
-             &dd->cs, &dd->freq, &dd->mode, &bb_reserve, &ecc_chk);
+             "bb_reserve: %u, ecc_chk: %B, spi: %T}",
+             &dd->cs, &dd->freq, &dd->mode, &bb_reserve, &ecc_chk,
+             &spi_cfg_json);
   dd->bb_reserve = bb_reserve;
   dd->ecc_chk = ecc_chk;
   if (dd->freq <= 0) goto out;
+  if (spi_cfg_json.ptr != NULL) {
+    struct mgos_config_spi spi_cfg = {.enable = true};
+    if (!mgos_spi_config_from_json(
+            mg_mk_str_n(spi_cfg_json.ptr, spi_cfg_json.len), &spi_cfg)) {
+      LOG(LL_ERROR, ("Invalid SPI config"));
+      goto out;
+    }
+    dd->spi = mgos_spi_create(&spi_cfg);
+    if (dd->spi == NULL) {
+      goto out;
+    }
+    dd->own_spi = true;
+  } else {
+    dd->spi = mgos_spi_get_global();
+    if (dd->spi == NULL) {
+      LOG(LL_INFO, ("SPI is disabled"));
+      res = MGOS_VFS_DEV_ERR_NXIO;
+      goto out;
+    }
+  }
   if (!vfs_dev_w25xxx_detect(dd)) {
     res = MGOS_VFS_DEV_ERR_NXIO;
     goto out;
@@ -502,9 +521,9 @@ static size_t vfs_dev_w25xxx_get_size(struct mgos_vfs_dev *dev) {
 }
 
 static enum mgos_vfs_dev_err vfs_dev_w25xxx_close(struct mgos_vfs_dev *dev) {
-  /* Nothing to do. */
-  (void) dev;
-  return true;
+  struct w25xxx_dev_data *dd = (struct w25xxx_dev_data *) dev->dev_data;
+  if (dd->own_spi) mgos_spi_close(dd->spi);
+  return MGOS_VFS_DEV_ERR_NONE;
 }
 
 bool w25xxx_remap_block(struct mgos_vfs_dev *dev, size_t bad_off,
@@ -512,7 +531,8 @@ bool w25xxx_remap_block(struct mgos_vfs_dev *dev, size_t bad_off,
   bool res = false;
   struct w25xxx_dev_data *dd = (struct w25xxx_dev_data *) dev->dev_data;
   uint8_t bdn;
-  uint16_t bpn;
+  uint16_t bpn, lba, pba;
+  struct w25xxx_bb_lut *lut;
   if (!w25xxx_map_page_ex(dd, bad_off, &bdn, &bpn, NULL, false)) {
     goto out;
   }
@@ -522,13 +542,13 @@ bool w25xxx_remap_block(struct mgos_vfs_dev *dev, size_t bad_off,
     goto out;
   }
   if (bdn != gdn) goto out; /* Cannot remap between different dies. */
-  const uint16_t lba = bpn >> 6, pba = gpn >> 6;
+  lba = bpn >> 6, pba = gpn >> 6;
   /*
    * The datasheet says:
    *   Registering the same address in multiple PBAs is prohibited.
    *   It may cause unexpected behavior.
    */
-  struct w25xxx_bb_lut *lut = &dd->bb_lut[bdn];
+  lut = &dd->bb_lut[bdn];
   for (int i = 0; i < ARRAY_SIZE(lut->e); i++) {
     if (lut->e[i].lba == lba) {
       LOG(LL_ERROR, ("Die %u: dup BB LUT entry for LBA %u", bdn, lba));
@@ -540,12 +560,14 @@ bool w25xxx_remap_block(struct mgos_vfs_dev *dev, size_t bad_off,
     LOG(LL_ERROR, ("Die %u: BB LUT full", bdn));
     goto out;
   }
-  uint8_t tx_data[5] = {
-      W25XXX_OP_BBM_SWAP_BLOCKS, (lba >> 8) & 0xff, (lba & 0xff),
-      (pba >> 8) & 0xff, (pba & 0xff),
-  };
-  if (!w25xxx_simple_op(dd, W25XXX_OP_WRITE_ENABLE)) goto out;
-  if (!w25xxx_txn(dd, sizeof(tx_data), tx_data, 0, 0, NULL)) goto out;
+  {
+    uint8_t tx_data[5] = {
+        W25XXX_OP_BBM_SWAP_BLOCKS, (lba >> 8) & 0xff, (lba & 0xff),
+        (pba >> 8) & 0xff, (pba & 0xff),
+    };
+    if (!w25xxx_simple_op(dd, W25XXX_OP_WRITE_ENABLE)) goto out;
+    if (!w25xxx_txn(dd, sizeof(tx_data), tx_data, 0, 0, NULL)) goto out;
+  }
   LOG(LL_INFO, ("Remap die %u block %u => %u", bdn, lba, pba));
   if (!w25xxx_read_bb_lut(dd, lut, NULL)) goto out;
   res = true;
