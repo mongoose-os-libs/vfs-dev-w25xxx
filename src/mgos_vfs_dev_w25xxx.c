@@ -202,7 +202,7 @@ static bool w25xxx_read_bb_lut(struct w25xxx_dev_data *dd,
                         tmp)) {
     goto out;
   }
-  for (int i = 0, j = 0; j < ARRAY_SIZE(lut->e); i++, j += 4) {
+  for (int i = 0, j = 0; j < (int) ARRAY_SIZE(lut->e); i++, j += 4) {
     struct w25xxx_bb_lut_entry *e = &lut->e[i];
     e->enable = !!(tmp[j] & 0x80);
     e->invalid = !!(tmp[j] & 0x40);
@@ -549,7 +549,7 @@ bool w25xxx_remap_block(struct mgos_vfs_dev *dev, size_t bad_off,
    *   It may cause unexpected behavior.
    */
   lut = &dd->bb_lut[bdn];
-  for (int i = 0; i < ARRAY_SIZE(lut->e); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(lut->e); i++) {
     if (lut->e[i].lba == lba) {
       LOG(LL_ERROR, ("Die %u: dup BB LUT entry for LBA %u", bdn, lba));
       goto out;
