@@ -95,7 +95,7 @@ struct w25xxx_bb_lut {
 struct w25xxx_dev_data {
   /* SPI settings */
   struct mgos_spi *spi;
-  int cs, freq, mode;
+  int spi_cs, spi_freq, spi_mode;
 
   size_t size;
   struct w25xxx_bb_lut bb_lut[W25XXX_MAX_NUM_DIES];
@@ -108,7 +108,8 @@ struct w25xxx_dev_data {
 static bool w25xxx_txn(struct w25xxx_dev_data *dd, size_t tx_len,
                        const void *tx_data, int dummy_len, size_t rx_len,
                        void *rx_data) {
-  struct mgos_spi_txn txn = {.cs = dd->cs, .mode = dd->mode, .freq = dd->freq};
+  struct mgos_spi_txn txn = {
+      .cs = dd->spi_cs, .mode = dd->spi_mode, .freq = dd->spi_freq};
   txn.hd.tx_len = tx_len;
   txn.hd.tx_data = tx_data;
   txn.hd.dummy_len = dummy_len;
@@ -274,43 +275,24 @@ out:
   return res;
 }
 
-static enum mgos_vfs_dev_err vfs_dev_w25xxx_open(struct mgos_vfs_dev *dev,
-                                                 const char *opts) {
+enum mgos_vfs_dev_err w25xxx_dev_init(struct mgos_vfs_dev *dev,
+                                      struct mgos_spi *spi, int spi_cs,
+                                      int spi_freq, int spi_mode,
+                                      int bb_reserve, bool ecc_chk) {
   enum mgos_vfs_dev_err res = MGOS_VFS_DEV_ERR_INVAL;
-  int bb_reserve = 24, ecc_chk = true;
-  struct json_token spi_cfg_json = JSON_INVALID_TOKEN;
   struct w25xxx_dev_data *dd =
       (struct w25xxx_dev_data *) calloc(1, sizeof(*dd));
-  if (dd == NULL) goto out;
-  dd->cs = -1;
-  json_scanf(opts, strlen(opts),
-             "{cs: %d, freq: %d, mode: %d, "
-             "bb_reserve: %u, ecc_chk: %B, spi: %T}",
-             &dd->cs, &dd->freq, &dd->mode, &bb_reserve, &ecc_chk,
-             &spi_cfg_json);
+  if (dd == NULL) {
+    res = MGOS_VFS_DEV_ERR_NOMEM;
+    goto out;
+  }
+  if (spi_freq <= 0) goto out;
+  dd->spi = spi;
+  dd->spi_cs = spi_cs;
+  dd->spi_freq = spi_freq;
+  dd->spi_mode = spi_mode;
   dd->bb_reserve = bb_reserve;
   dd->ecc_chk = ecc_chk;
-  if (dd->freq <= 0) goto out;
-  if (spi_cfg_json.ptr != NULL) {
-    struct mgos_config_spi spi_cfg = {.enable = true};
-    if (!mgos_spi_config_from_json(
-            mg_mk_str_n(spi_cfg_json.ptr, spi_cfg_json.len), &spi_cfg)) {
-      LOG(LL_ERROR, ("Invalid SPI config"));
-      goto out;
-    }
-    dd->spi = mgos_spi_create(&spi_cfg);
-    if (dd->spi == NULL) {
-      goto out;
-    }
-    dd->own_spi = true;
-  } else {
-    dd->spi = mgos_spi_get_global();
-    if (dd->spi == NULL) {
-      LOG(LL_INFO, ("SPI is disabled"));
-      res = MGOS_VFS_DEV_ERR_NXIO;
-      goto out;
-    }
-  }
   if (!vfs_dev_w25xxx_detect(dd)) {
     res = MGOS_VFS_DEV_ERR_NXIO;
     goto out;
@@ -319,6 +301,46 @@ static enum mgos_vfs_dev_err vfs_dev_w25xxx_open(struct mgos_vfs_dev *dev,
   res = MGOS_VFS_DEV_ERR_NONE;
 out:
   if (res != 0) free(dd);
+  return res;
+}
+
+enum mgos_vfs_dev_err vfs_dev_w25xxx_open(struct mgos_vfs_dev *dev,
+                                          const char *opts) {
+  enum mgos_vfs_dev_err res = MGOS_VFS_DEV_ERR_INVAL;
+  int cs_num = -1, spi_freq = 0, spi_mode = 0, bb_reserve = 24, ecc_chk = true;
+  struct json_token spi_cfg_json = JSON_INVALID_TOKEN;
+  struct mgos_spi *spi = NULL;
+  json_scanf(opts, strlen(opts),
+             "{cs: %d, freq: %d, mode: %d, "
+             "bb_reserve: %u, ecc_chk: %B, spi: %T}",
+             &cs_num, &spi_freq, &spi_mode, &bb_reserve, &ecc_chk,
+             &spi_cfg_json);
+  if (spi_cfg_json.ptr != NULL) {
+    struct mgos_config_spi spi_cfg = {.enable = true};
+    if (!mgos_spi_config_from_json(
+            mg_mk_str_n(spi_cfg_json.ptr, spi_cfg_json.len), &spi_cfg)) {
+      LOG(LL_ERROR, ("Invalid SPI config"));
+      goto out;
+    }
+    spi = mgos_spi_create(&spi_cfg);
+    if (spi == NULL) {
+      goto out;
+    }
+  } else {
+    spi = mgos_spi_get_global();
+    if (spi == NULL) {
+      LOG(LL_INFO, ("SPI is disabled"));
+      res = MGOS_VFS_DEV_ERR_NXIO;
+      goto out;
+    }
+  }
+  res = w25xxx_dev_init(dev, spi, cs_num, spi_freq, spi_mode, bb_reserve,
+                        ecc_chk);
+  if (res == 0) {
+    struct w25xxx_dev_data *dd = (struct w25xxx_dev_data *) dev->dev_data;
+    dd->own_spi = (spi != mgos_spi_get_global());
+  }
+out:
   return res;
 }
 
@@ -412,6 +434,8 @@ out:
 #if W25XXX_DEBUG
   if (res) mg_hexdumpf(stderr, dst, orig_len);
 #endif
+  (void) orig_off;
+  (void) orig_len;
   return res;
 }
 
@@ -473,6 +497,8 @@ out:
   LOG((res == 0 ? W25XXX_DEBUG_LEVEL : LL_ERROR),
       ("%p write %u @ 0x%x -> %d", dev, (unsigned int) orig_len,
        (unsigned int) orig_off, res));
+  (void) orig_off;
+  (void) orig_len;
   return res;
 }
 
@@ -512,6 +538,8 @@ out:
       ("%p erase %u @ 0x%x (pg %u blk %u) -> %d", dev, (unsigned int) orig_len,
        (unsigned int) orig_off, (unsigned int) (orig_off / W25XXX_PAGE_SIZE),
        (unsigned int) (orig_off / W25XXX_BLOCK_SIZE), res));
+  (void) orig_off;
+  (void) orig_len;
   return res;
 }
 
@@ -576,8 +604,10 @@ out:
   return res;
 }
 
-static const struct mgos_vfs_dev_ops vfs_dev_w25xxx_ops = {
+const struct mgos_vfs_dev_ops mgos_vfs_dev_w25xxx_ops = {
+#ifndef MGOS_NO_MAIN
     .open = vfs_dev_w25xxx_open,
+#endif
     .read = vfs_dev_w25xxx_read,
     .write = vfs_dev_w25xxx_write,
     .erase = vfs_dev_w25xxx_erase,
@@ -587,5 +617,5 @@ static const struct mgos_vfs_dev_ops vfs_dev_w25xxx_ops = {
 
 bool mgos_vfs_dev_w25xxx_init(void) {
   return mgos_vfs_dev_register_type(MGOS_VFS_DEV_TYPE_W25XXX,
-                                    &vfs_dev_w25xxx_ops);
+                                    &mgos_vfs_dev_w25xxx_ops);
 }

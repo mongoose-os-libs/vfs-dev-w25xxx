@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "mgos_spi.h"
 #include "mgos_vfs_dev.h"
 
 #ifdef __cplusplus
@@ -28,6 +29,11 @@ extern "C" {
 #define W25XXX_PAGE_SIZE 2048U
 #define W25XXX_BLOCK_SIZE (64 * W25XXX_PAGE_SIZE)
 #define W25XXX_DIE_SIZE (1024 * W25XXX_BLOCK_SIZE)
+
+enum mgos_vfs_dev_err w25xxx_dev_init(struct mgos_vfs_dev *dev,
+                                      struct mgos_spi *spi, int spi_cs,
+                                      int spi_freq, int spi_mode,
+                                      int bb_reserve, bool ecc_chk);
 
 /*
  * Adds a bad block lookup table entry.
