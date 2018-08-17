@@ -605,9 +605,7 @@ out:
 }
 
 const struct mgos_vfs_dev_ops mgos_vfs_dev_w25xxx_ops = {
-#ifndef MGOS_BOOT_BUILD
     .open = vfs_dev_w25xxx_open,
-#endif
     .read = vfs_dev_w25xxx_read,
     .write = vfs_dev_w25xxx_write,
     .erase = vfs_dev_w25xxx_erase,
