@@ -554,6 +554,13 @@ static enum mgos_vfs_dev_err vfs_dev_w25xxx_close(struct mgos_vfs_dev *dev) {
   return MGOS_VFS_DEV_ERR_NONE;
 }
 
+static enum mgos_vfs_dev_err vfs_dev_w25xxx_get_erase_sizes(
+    struct mgos_vfs_dev *dev, size_t sizes[MGOS_VFS_DEV_NUM_ERASE_SIZES]) {
+  sizes[0] = W25XXX_BLOCK_SIZE;
+  (void) dev;
+  return MGOS_VFS_DEV_ERR_NONE;
+}
+
 bool w25xxx_remap_block(struct mgos_vfs_dev *dev, size_t bad_off,
                         size_t good_off) {
   bool res = false;
@@ -611,6 +618,7 @@ const struct mgos_vfs_dev_ops mgos_vfs_dev_w25xxx_ops = {
     .erase = vfs_dev_w25xxx_erase,
     .get_size = vfs_dev_w25xxx_get_size,
     .close = vfs_dev_w25xxx_close,
+    .get_erase_sizes = vfs_dev_w25xxx_get_erase_sizes,
 };
 
 bool mgos_vfs_dev_w25xxx_init(void) {
